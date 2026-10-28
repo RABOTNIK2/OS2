@@ -1,11 +1,9 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <string.h>
-#include <time.h>
 #include <tlhelp32.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
 
 #define MAX_POINTS 200000
 #define MAX_CLUSTERS 64
@@ -27,6 +25,65 @@ typedef struct {
     int nThreads;
     int start, end;
 } ThreadArg;
+
+static HANDLE g_hOut = INVALID_HANDLE_VALUE;
+static HANDLE g_hErr = INVALID_HANDLE_VALUE;
+
+static void con_write(const char *s)
+{
+    if (!s) return;
+    DWORD written;
+    WriteConsoleA(g_hOut, s, (DWORD)strlen(s), &written, NULL);
+}
+
+static void con_write_err(const char *s)
+{
+    if (!s) return;
+    DWORD written;
+    WriteConsoleA(g_hErr, s, (DWORD)strlen(s), &written, NULL);
+}
+
+static void con_write_int(long long v)
+{
+    char buf[32];
+    int i = 0;
+    int neg = 0;
+    unsigned long long u;
+    if (v < 0) { neg = 1; u = (unsigned long long)(-(v + 1)) + 1ULL; }
+    else { u = (unsigned long long)v; }
+    if (u == 0) buf[i++] = '0';
+    while (u > 0) { buf[i++] = (char)('0' + (u % 10)); u /= 10; }
+    if (neg) buf[i++] = '-';
+    for (int a = 0, b = i - 1; a < b; a++, b--) {
+        char t = buf[a]; buf[a] = buf[b]; buf[b] = t;
+    }
+    DWORD written;
+    WriteConsoleA(g_hOut, buf, (DWORD)i, &written, NULL);
+}
+
+static void con_write_double(double d, int prec)
+{
+    if (d != d) { con_write("nan"); return; }
+    if (d < 0) { con_write("-"); d = -d; }
+    unsigned long long ip = (unsigned long long)d;
+    con_write_int((long long)ip);
+    con_write(".");
+    double frac = d - (double)ip;
+    for (int i = 0; i < prec; i++) frac *= 10.0;
+    unsigned long long f = (unsigned long long)(frac + 0.5);
+    if (prec > 0) {
+        char buf[32];
+        int i = 0;
+        if (f == 0) buf[i++] = '0';
+        while (f > 0) { buf[i++] = (char)('0' + (f % 10)); f /= 10; }
+        while (i < prec) buf[i++] = '0';
+        for (int a = 0, b = i - 1; a < b; a++, b--) {
+            char t = buf[a]; buf[a] = buf[b]; buf[b] = t;
+        }
+        DWORD written;
+        WriteConsoleA(g_hOut, buf, (DWORD)i, &written, NULL);
+    }
+}
 
 static double dist2(double x1, double y1, double x2, double y2)
 {
@@ -119,10 +176,9 @@ static void kmeans_parallel(int maxThreads, int maxIter)
             args[t].start = t * chunk + (t < rem ? t : rem);
             args[t].end = args[t].start + chunk + (t < rem ? 1 : 0);
 
-            handles[t] = CreateThread(
-                NULL, 0, thread_assign, &args[t], 0, NULL);
+            handles[t] = CreateThread(NULL, 0, thread_assign, &args[t], 0, NULL);
             if (handles[t] == NULL) {
-                fprintf(stderr, "CreateThread failed for thread %d\n", t);
+                con_write_err("CreateThread failed\n");
                 ExitProcess(1);
             }
         }
@@ -151,21 +207,29 @@ static double now_ms(void)
     return (double)cnt.QuadPart * 1000.0 / (double)freq.QuadPart;
 }
 
+static unsigned long long g_rngState = 42;
+
+static unsigned int rng_next(void)
+{
+    g_rngState = g_rngState * 6364136223846793005ULL + 1442695040888963407ULL;
+    return (unsigned int)(g_rngState >> 33);
+}
+
 static void init_points(int n)
 {
     g_nPoints = n;
-    srand(42);
+    g_rngState = 42;
     for (int i = 0; i < n; i++) {
-        g_points[i].x = (double)(rand() % 100000) / 100.0;
-        g_points[i].y = (double)(rand() % 100000) / 100.0;
+        g_points[i].x = (double)(rng_next() % 100000) / 100.0;
+        g_points[i].y = (double)(rng_next() % 100000) / 100.0;
     }
 }
 
 static void init_centroids(int k)
 {
     g_k = k;
-    srand(123);
-    int idx = rand() % g_nPoints;
+    g_rngState = 123;
+    int idx = (int)(rng_next() % (unsigned int)g_nPoints);
     g_centroids[0] = (Centroid){ g_points[idx].x, g_points[idx].y };
 
     for (int c = 1; c < k; c++) {
@@ -201,8 +265,7 @@ static int count_process_threads(void)
 
     if (Thread32First(snap, &te)) {
         do {
-            if (te.th32OwnerProcessID == pid)
-                count++;
+            if (te.th32OwnerProcessID == pid) count++;
         } while (Thread32Next(snap, &te));
     }
     CloseHandle(snap);
@@ -211,17 +274,27 @@ static int count_process_threads(void)
 
 static void print_points(const char *title, int limit)
 {
-    printf("--- %s ---\n", title);
+    con_write("--- ");
+    con_write(title);
+    con_write(" ---\n");
     int m = g_nPoints < limit ? g_nPoints : limit;
     for (int i = 0; i < m; i++) {
-        if (g_assign[i] < 0)
-            printf("  [%6d] (%9.3f, %9.3f)  cluster = ?\n", i, g_points[i].x, g_points[i].y);
-        else
-            printf("  [%6d] (%9.3f, %9.3f)  cluster = %d\n", i, g_points[i].x, g_points[i].y, g_assign[i]);
+        con_write("  [");
+        con_write_int(i);
+        con_write("] (");
+        con_write_double(g_points[i].x, 3);
+        con_write(", ");
+        con_write_double(g_points[i].y, 3);
+        con_write(")  cluster = ");
+        if (g_assign[i] < 0) con_write("?\n");
+        else { con_write_int(g_assign[i]); con_write("\n"); }
     }
-    if (g_nPoints > limit)
-        printf("  ... (%d more points not shown)\n", g_nPoints - limit);
-    printf("\n");
+    if (g_nPoints > limit) {
+        con_write("  ... (");
+        con_write_int(g_nPoints - limit);
+        con_write(" more points not shown)\n");
+    }
+    con_write("\n");
 }
 
 static int cmp_by_cluster(const void *a, const void *b)
@@ -232,11 +305,11 @@ static int cmp_by_cluster(const void *a, const void *b)
 
 static void print_grouped(int limit)
 {
-    printf("--- GROUPED BY CLUSTER ---\n");
-    int *idx = (int *)malloc(sizeof(int) * g_nPoints);
-    if (!idx) { printf("  (out of memory)\n\n"); return; }
+    con_write("--- GROUPED BY CLUSTER ---\n");
+    int *idx = (int *)malloc(sizeof(int) * (size_t)g_nPoints);
+    if (!idx) { con_write("  (out of memory)\n\n"); return; }
     for (int i = 0; i < g_nPoints; i++) idx[i] = i;
-    qsort(idx, g_nPoints, sizeof(int), cmp_by_cluster);
+    qsort(idx, (size_t)g_nPoints, sizeof(int), cmp_by_cluster);
 
     int m = g_nPoints < limit ? g_nPoints : limit;
     int cur = -2;
@@ -244,31 +317,67 @@ static void print_grouped(int limit)
         int id = idx[i];
         if (g_assign[id] != cur) {
             cur = g_assign[id];
-            printf("=== cluster %d ===\n", cur);
+            con_write("=== cluster ");
+            con_write_int(cur);
+            con_write(" ===\n");
         }
-        printf("  [%6d] (%9.3f, %9.3f)\n", id, g_points[id].x, g_points[id].y);
+        con_write("  [");
+        con_write_int(id);
+        con_write("] (");
+        con_write_double(g_points[id].x, 3);
+        con_write(", ");
+        con_write_double(g_points[id].y, 3);
+        con_write(")\n");
     }
-    if (g_nPoints > limit)
-        printf("  ... (%d more points not shown)\n", g_nPoints - limit);
+    if (g_nPoints > limit) {
+        con_write("  ... (");
+        con_write_int(g_nPoints - limit);
+        con_write(" more points not shown)\n");
+    }
     free(idx);
-    printf("\n");
+    con_write("\n");
 }
 
 static void print_summary(void)
 {
-    int cnt[MAX_CLUSTERS] = {0};
+    int *cnt = (int *)malloc(sizeof(int) * (size_t)g_k);
+    for (int c = 0; c < g_k; c++) cnt[c] = 0;
     for (int i = 0; i < g_nPoints; i++) {
         if (g_assign[i] >= 0 && g_assign[i] < g_k) cnt[g_assign[i]]++;
     }
-    printf("--- CLUSTERING RESULT ---\n");
+    con_write("--- CLUSTERING RESULT ---\n");
     for (int c = 0; c < g_k; c++) {
-        printf("  cluster %2d : centroid = (%9.3f, %9.3f)  size = %d\n", c, g_centroids[c].x, g_centroids[c].y, cnt[c]);
+        con_write("  cluster ");
+        con_write_int(c);
+        con_write(" : centroid = (");
+        con_write_double(g_centroids[c].x, 3);
+        con_write(", ");
+        con_write_double(g_centroids[c].y, 3);
+        con_write(")  size = ");
+        con_write_int(cnt[c]);
+        con_write("\n");
     }
-    printf("\n");
+    con_write("\n");
+    free(cnt);
+}
+
+static long parse_long(const char *s)
+{
+    long v = 0;
+    int neg = 0;
+    if (!s) return 0;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '-') { neg = 1; s++; }
+    else if (*s == '+') s++;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    return neg ? -v : v;
 }
 
 int main(int argc, char *argv[])
 {
+    g_hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    g_hErr = GetStdHandle(STD_ERROR_HANDLE);
+
     int maxThreads = 4;
     int showThreads = 0;
     int nPoints = 50000;
@@ -279,15 +388,15 @@ int main(int argc, char *argv[])
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
-            maxThreads = atoi(argv[++i]);
+            maxThreads = (int)parse_long(argv[++i]);
             if (maxThreads < 1) maxThreads = 1;
             if (maxThreads > MAX_THREADS) maxThreads = MAX_THREADS;
         } else if (strcmp(argv[i], "-v") == 0) {
             showThreads = 1;
         } else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc) {
-            nPoints = atoi(argv[++i]);
+            nPoints = (int)parse_long(argv[++i]);
         } else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
-            k = atoi(argv[++i]);
+            k = (int)parse_long(argv[++i]);
             if (k < 1) k = 1;
             if (k > MAX_CLUSTERS) k = MAX_CLUSTERS;
         } else if (strcmp(argv[i], "-p") == 0) {
@@ -295,14 +404,17 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "-s") == 0) {
             groupMode = 1;
         } else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
-            printLimit = atoi(argv[++i]);
+            printLimit = (int)parse_long(argv[++i]);
             if (printLimit < 1) printLimit = 1;
         }
     }
 
     if (nPoints > MAX_POINTS) nPoints = MAX_POINTS;
-    printf("=== K-means (Windows Win32 API) ===\n");
-    printf("Points: %d, Clusters: %d, Max threads: %d\n\n", nPoints, k, maxThreads);
+    con_write("=== K-means (Windows Win32 API) ===\n");
+    con_write("Points: "); con_write_int(nPoints);
+    con_write(", Clusters: "); con_write_int(k);
+    con_write(", Max threads: "); con_write_int(maxThreads);
+    con_write("\n\n");
 
     init_points(nPoints);
     init_centroids(k);
@@ -314,10 +426,14 @@ int main(int argc, char *argv[])
     kmeans_serial(MAX_ITER);
     double t1 = now_ms();
     double serial_ms = t1 - t0;
-    printf("[SERIAL]   time = %.3f ms\n", serial_ms);
+    con_write("[SERIAL]   time = ");
+    con_write_double(serial_ms, 3);
+    con_write(" ms\n");
 
     if (showThreads) {
-        printf("  Threads in process (serial phase): %d\n", count_process_threads());
+        con_write("  Threads in process (serial phase): ");
+        con_write_int(count_process_threads());
+        con_write("\n");
     }
 
     if (printMode) print_points("AFTER SERIAL CLUSTERING", printLimit);
@@ -335,12 +451,22 @@ int main(int argc, char *argv[])
     double speedup    = serial_ms / parallel_ms;
     double efficiency = speedup / (double)maxThreads;
 
-    printf("[PARALLEL] time = %.3f ms  (threads = %d)\n", parallel_ms, maxThreads);
-    printf("           speedup    = %.3f\n", speedup);
-    printf("           efficiency = %.3f\n", efficiency);
+    con_write("[PARALLEL] time = ");
+    con_write_double(parallel_ms, 3);
+    con_write(" ms  (threads = ");
+    con_write_int(maxThreads);
+    con_write(")\n");
+    con_write("           speedup    = ");
+    con_write_double(speedup, 3);
+    con_write("\n");
+    con_write("           efficiency = ");
+    con_write_double(efficiency, 3);
+    con_write("\n");
 
     if (showThreads) {
-        printf("  Threads in process (parallel phase, after join): %d\n", count_process_threads());
+        con_write("  Threads in process (parallel phase, after join): ");
+        con_write_int(count_process_threads());
+        con_write("\n");
     }
 
     if (printMode) print_points("AFTER PARALLEL CLUSTERING", printLimit);
