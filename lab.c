@@ -20,8 +20,6 @@ static int g_assign[MAX_POINTS];
 static int g_changed = 0;
 
 typedef struct {
-    int tid;
-    int nThreads;
     int start, end;
 } ThreadArg;
 
@@ -54,7 +52,9 @@ static void con_write_int(long long v)
     while (u > 0) { buf[i++] = (char)('0' + (u % 10)); u /= 10; }
     if (neg) buf[i++] = '-';
     for (int a = 0, b = i - 1; a < b; a++, b--) {
-        char t = buf[a]; buf[a] = buf[b]; buf[b] = t;
+        char t = buf[a]; 
+        buf[a] = buf[b]; 
+        buf[b] = t;
     }
     DWORD written;
     WriteConsoleA(g_hOut, buf, (DWORD)i, &written, NULL);
@@ -170,8 +170,6 @@ static void kmeans_parallel(int maxThreads, int maxIter)
         int rem = g_nPoints % nThreads;
 
         for (int t = 0; t < nThreads; t++) {
-            args[t].tid = t;
-            args[t].nThreads = nThreads;
             args[t].start = t * chunk + (t < rem ? t : rem);
             args[t].end = args[t].start + chunk + (t < rem ? 1 : 0);
 
